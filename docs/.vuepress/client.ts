@@ -1,0 +1,31 @@
+import { defineClientConfig } from 'vuepress/client'
+// import RepoCard from 'vuepress-theme-plume/features/RepoCard.vue'
+// import NpmBadge from 'vuepress-theme-plume/features/NpmBadge.vue'
+// import NpmBadgeGroup from 'vuepress-theme-plume/features/NpmBadgeGroup.vue'
+// import Swiper from 'vuepress-theme-plume/features/Swiper.vue'
+import { Layout } from 'vuepress-theme-plume/client'
+import { h } from 'vue'
+import PageContextMenu from 'vuepress-theme-plume/features/PageContextMenu.vue'
+
+// import CustomComponent from './theme/components/Custom.vue'
+
+// import './theme/styles/custom.css'
+
+export default defineClientConfig({
+  enhance({ app }) {
+    // built-in components
+    // app.component('RepoCard', RepoCard)
+    // app.component('NpmBadge', NpmBadge)
+    // app.component('NpmBadgeGroup', NpmBadgeGroup)
+    // app.component('Swiper', Swiper) // you should install `swiper`
+
+    // your custom components
+    // app.component('CustomComponent', CustomComponent)
+  },
+  layouts: {
+    Layout: h(Layout, null, {
+      // Add PageContextMenu to the doc-title-after slot, i.e., to the right of the article title
+      'doc-title-after': () => h(PageContextMenu), 
+    }),
+  },
+})

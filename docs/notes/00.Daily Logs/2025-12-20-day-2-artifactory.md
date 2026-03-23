@@ -17,7 +17,7 @@ I need a Binary Repository (Artifactory) to store Yocto SSTATE cache and huge `.
 
 1. **The Bandwidth Wall:** Cloudflare Free Tier enforces a strict **100MB upload limit** per request.
 2. **The Physics:** Uploading a 4GB image from my residential connection (30Mbps upstream) would take ~20 minutes per build. This destroys the feedback loop.
-3. **The "Split Brain" Network:** I tried hosting Artifactory locally but accessing it via a public URL (`artifactory.notcoderguy.com`). This caused a routing loop where the Docker container couldn't talk to itself correctly via the external proxy, leading to "Endless Loading" screens and CORS errors.
+3. **The "Split Brain" Network:** I tried hosting Artifactory locally but accessing it via a public URL. This caused a routing loop where the Docker container couldn't talk to itself correctly via the external proxy, leading to "Endless Loading" screens and CORS errors.
 
 ## The Pivot (ADR 002)
 

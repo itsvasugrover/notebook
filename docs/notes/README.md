@@ -58,8 +58,8 @@ Looking ahead, I aim to:
 
 > _"The only difference between screwing around and science is writing it down."_ — Alex Jason
 
-> _"In the world of embedded systems, the best code is the code that works reliably in the real world."_ — NotCoderGuy
+> _"In the world of embedded systems, the best code is the code that works reliably in the real world."_ — Vasu Grover
 
 ---
 
-_Created by Vasu Grover (Systems Engineer)_
+_Created by Vasu Grover | [GitHub](https://github.com/itsvasugrover)

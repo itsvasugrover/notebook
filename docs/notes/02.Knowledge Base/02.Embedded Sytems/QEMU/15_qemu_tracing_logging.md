@@ -6,113 +6,308 @@ permalink: /kb/embedded/qemu/qemu-tracing-logging/
 
 # QEMU Tracing and Logging
 
-Tracing and logging are essential tools for debugging and analyzing the behavior of emulated systems in QEMU. These features provide insights into the internal operations of the emulator, helping developers identify issues, optimize performance, and understand system interactions.
+QEMU has a dedicated trace framework that is separate from the `-d` debug log. The trace framework uses statically defined trace points in QEMU's source code, activated at runtime via patterns. This page covers the trace backends, trace point syntax, `simpletrace` binary format, and how to add custom trace points when developing device models.
 
-## Why Use Tracing and Logging?
+---
 
-Tracing and logging in QEMU are useful for:
-- **Debugging**: Identify and resolve issues in the emulated system.
-- **Performance Analysis**: Measure and optimize system performance.
+## Trace Framework Architecture
+
+```
+QEMU source file (.c)
+  │
+  └── trace_<event_name>(args...)    ← generated call
+        │
+        ↓
+  Trace backend (selected at build time)
+  ├── simple   → binary trace file (simpletrace format)
+  ├── log      → text output via qemu debug log (-d trace:*)
+  ├── ust      → LTTng User Space Tracing
+  ├── dtrace   → SystemTap / DTrace probes
+  └── nop      → disabled (zero overhead; default for release)
+```
+
+Each trace event is declared in a `.trace-events` file in the relevant source directory. The build system generates `trace/generated-tracers.h` with `trace_<name>()` functions for each backend.
+
+---
+
+## Build with Trace Support
+
+```bash
+# Default build includes simple + log backends
+../qemu/configure --target-list=arm-softmmu --enable-trace-backends=simple,log
+
+# LTTng UST backend
+../qemu/configure --target-list=arm-softmmu \
+    --enable-trace-backends=ust \
+    --extra-cflags="-I$(pkg-config --variable=includedir lttng-ust)"
+```
+
+Available backends: `simple`, `log`, `ust`, `dtrace`, `ftrace`, `nop`. Multiple backends can be compiled in simultaneously.
+
+---
+
+## Enabling Trace Events at Runtime
+
+### Pattern-based activation
+
+```bash
+# Enable all PL011 trace events
+qemu-system-arm -M mps2-an385 -kernel firmware.elf -nographic \
+    -trace events=pl011_*
+
+# Multiple patterns (separate -trace flags)
+qemu-system-arm ... \
+    -trace events=pl011_* \
+    -trace events=nvic_*
+
+# Enable all events (warning: very verbose)
+qemu-system-arm ... -trace events="*"
+
+# Write trace to file (simple backend)
+qemu-system-arm ... \
+    -trace events=pl011_* \
+    -trace file=/tmp/trace.bin
+```
+
+Use a file of patterns with one event name or glob per line:
+
+```bash
+echo "pl011_read" > /tmp/trace-events
+echo "pl011_write" >> /tmp/trace-events
+qemu-system-arm ... -trace events=/tmp/trace-events
+```
+
+### Dynamic enable/disable via Monitor
+
+```
+(qemu) trace-event pl011_* on
+(qemu) trace-event pl011_* off
+(qemu) info trace-events           # list all events and their state
+```
+
+---
+
+## simpletrace Binary Format
+
+When using the `simple` backend, QEMU writes a binary trace file. The format is a sequence of records:
+
+**File header** (first 8 bytes):
+```
+magic:    0x54524143 ("TRAC") as uint32_t
+version:  uint32_t (current = 4)
+```
+
+**Trace record** per event hit:
+```
+event_id:   uint64_t (index into event table)
+timestamp:  uint64_t (nanoseconds since QEMU start, from host clock)
+length:     uint32_t (total byte length of this record including header)
+pid:        uint32_t (host process/thread ID)
+arguments:  variable, as declared in .trace-events
+```
+
+### Parsing with `simpletrace.py`
+
+QEMU ships `scripts/simpletrace.py` to decode this binary:
+
+```bash
+# Basic decode
+python3 /path/to/qemu/scripts/simpletrace.py \
+    /path/to/qemu/arm-softmmu/trace-events-all \
+    /tmp/trace.bin
+
+# Output format:
+# <timestamp_ns> <event_name>(<arg1>, <arg2>, ...)
+# 1234567890 pl011_read(offset=0x18, val=0x20, size=4)
+# 1234568000 pl011_write(offset=0x0, val=0x48, size=4)
+
+# Filter to specific events
+python3 scripts/simpletrace.py \
+    arm-softmmu/trace-events-all /tmp/trace.bin \
+    | grep pl011_write
+```
+
+### Custom simpletrace parser
+
+```python
+#!/usr/bin/env python3
+# analyze_uart.py — summarize UART TX traffic from trace
+import sys
+sys.path.insert(0, '/path/to/qemu/scripts')
+import simpletrace
+
+class Analyzer(simpletrace.Analyzer):
+    def pl011_write(self, offset, value, size):
+        if offset == 0:   # UARTDR
+            ch = value & 0xFF
+            if 0x20 <= ch < 0x7F:
+                print(f'TX: {chr(ch)!r}')
+
+simpletrace.run(Analyzer())
+```
+
+```bash
+python3 analyze_uart.py arm-softmmu/trace-events-all /tmp/trace.bin
+```
+
+---
+
+## Trace Event Definition Syntax
+
+Trace events are defined in `.trace-events` files in QEMU's source directories. Each line defines one event:
+
+```
+# hw/char/trace-events
+pl011_read(uint64_t offset, uint64_t value, unsigned size) "offset 0x%"PRIx64" value 0x%"PRIx64" size %u"
+pl011_write(uint64_t offset, uint64_t value, unsigned size) "offset 0x%"PRIx64" value 0x%"PRIx64" size %u"
+pl011_irq_state(int level) "level %d"
+```
+
+Format: `<event_name>(<typed_params>) "<format_string>"`
+
+**Special prefixes:**
+
+| Prefix | Meaning |
+|--------|---------|
+| `disable <name>(...)` | Event exists but is disabled by default |
+| `# comment` | Comment line |
+
+The format string is used by the `log` backend (formatted to stderr) and by `simpletrace.py` for display. The binary `simple` backend records raw argument bytes without the format string.
+
+---
+
+## Adding a Custom Trace Point
+
+To add trace events to your custom device model:
+
+### 1. Create `trace-events` file
+
+```
+# hw/char/my_uart-trace-events
+my_uart_read(uint64_t offset, uint64_t value) "offset=0x%"PRIx64" value=0x%"PRIx64
+my_uart_write(uint64_t offset, uint64_t value) "offset=0x%"PRIx64" value=0x%"PRIx64
+my_uart_rx(uint8_t ch) "char=0x%02x"
+```
+
+### 2. Register in the meson build
+
+In `hw/char/meson.build`:
+```python
+system_ss.add(when: 'CONFIG_MY_UART',
+              if_true: [files('my_uart.c'),
+                        trace_events('my_uart-trace-events')])
+```
+
+### 3. Include and call in the device source
+
+```c
+#include "trace.h"   /* generated by the build system */
+
+static uint64_t my_uart_read(void *opaque, hwaddr offset, unsigned size)
+{
+    uint64_t val = /* ... compute value ... */ 0;
+    trace_my_uart_read(offset, val);    /* ← zero cost when disabled */
+    return val;
+}
+
+static void my_uart_write(void *opaque, hwaddr offset,
+                           uint64_t value, unsigned size)
+{
+    trace_my_uart_write(offset, value);
+    /* ... handle write ... */
+}
+```
+
+When the `nop` backend is selected, `trace_my_uart_read()` compiles to an empty inline function — zero overhead in release builds.
+
+---
+
+## LTTng UST Backend
+
+The `ust` (User Space Tracing) backend emits events as LTTng trace points, which are consumable by `lttng` tooling and viewable with Trace Compass:
+
+```bash
+# Start LTTng session
+lttng create qemu-session
+lttng enable-event --userspace "qemu:pl011_*"
+lttng start
+
+# Run QEMU (compiled with --enable-trace-backends=ust)
+qemu-system-arm -M mps2-an385 -kernel firmware.elf -nographic
+
+# Stop and view
+lttng stop
+lttng view
+# or
+babeltrace2 ~/lttng-traces/qemu-session*/
+```
+
+LTTng provides microsecond-resolution timestamps using the perf_event clock, and its ring-buffer approach has lower overhead than the `simple` file backend for high-frequency events.
+
+---
+
+## SystemTap / DTrace Backend
+
+On Linux with SystemTap, the `dtrace` backend generates `.stp` probe points:
+
+```bash
+../qemu/configure --enable-trace-backends=dtrace ...
+```
+
+QEMU generates `trace/generated-tracers.d` with DTrace probe definitions. SystemTap can intercept these probes on a running QEMU process:
+
+```stp
+#!/usr/bin/stap
+probe process("qemu-system-arm").mark("pl011_write") {
+    printf("UART write: offset=%d value=%d\n", $arg1, $arg2)
+}
+```
+
+```bash
+stap my_uart_probe.stp -c 'qemu-system-arm -M mps2-an385 -kernel fw.elf -nographic'
+```
+
+---
+
+## Log Backend (`-d trace:*`)
+
+The `log` backend integrates trace events with QEMU's `-d` system. No binary file is required:
+
+```bash
+qemu-system-arm -M mps2-an385 -kernel firmware.elf -nographic \
+    -d trace:pl011_* -D /tmp/qemu.log
+```
+
+Output in `/tmp/qemu.log`:
+```
+2234567890 pl011_write offset 0x0 value 0x48 size 4
+2234568010 pl011_write offset 0x0 value 0x65 size 4
+2234568020 pl011_write offset 0x0 value 0x6c size 4
+```
+
+This is the simplest way to get readable trace output without binary parsing.
+
+---
+
+## Key Trace Event Namespaces
+
+QEMU's trace events are organized by source directory:
+
+| Pattern | Source | What it covers |
+|---------|--------|----------------|
+| `pl011_*` | `hw/char/pl011.c` | UART register reads/writes, IRQ state |
+| `nvic_*` | `hw/intc/armv7m_nvic.c` | NVIC interrupt state changes |
+| `arm_cpu_*` | `target/arm/cpu.c` | CPU exception entry/exit |
+| `virtio_*` | `hw/virtio/` | VirtIO queue operations |
+| `kvm_*` | `accel/kvm/` | KVM VM exit events |
+| `qcow2_*` | `block/qcow2*.c` | qcow2 cluster allocation |
+| `dma_*` | `hw/dma/` | DMA channel operations |
+| `i2c_*` | `hw/i2c/` | I2C bus transfers |
+| `spi_*` | `hw/ssi/` | SPI bus transfers |
+
+List all available trace events on your build:
+
+```bash
+cat arm-softmmu/trace-events-all | grep "^[a-z]" | cut -d'(' -f1 | sort
+```
 - **System Understanding**: Gain insights into the interactions between software and hardware.
-- **Testing**: Validate system behavior under different scenarios.
-
-## Key Features of QEMU Tracing and Logging
-
-### 1. **Tracing Framework**
-- QEMU includes a built-in tracing framework that captures detailed information about the emulator's operations.
-- **Supported Events**:
-  - CPU instructions
-  - Memory accesses
-  - I/O operations
-  - Device interactions
-- **Output**: Traces can be written to files or displayed in real-time.
-
-### 2. **Logging Options**
-- QEMU provides extensive logging capabilities to monitor specific subsystems.
-- **Subsystems**:
-  - CPU
-  - Memory
-  - Devices
-  - Network
-- **Output**: Logs can be directed to the console, files, or other outputs.
-
-## Enabling Tracing in QEMU
-
-### Step 1: List Available Trace Events
-Use the `-trace help` option to list all available trace events:
-```bash
-qemu-system-arm -trace help
-```
-
-### Step 2: Enable Specific Trace Events
-Specify the events to trace using the `-trace` option:
-```bash
-qemu-system-arm -trace events=trace-events -M versatilepb -kernel firmware.elf
-```
-
-### Step 3: Analyze Trace Output
-The trace output can be analyzed using standard tools like `grep` or custom scripts.
-
-## Enabling Logging in QEMU
-
-### Step 1: Enable Logging
-Use the `-d` option to enable logging for specific subsystems:
-```bash
-qemu-system-arm -d cpu_reset,in_asm -M versatilepb -kernel firmware.elf
-```
-
-### Step 2: Specify Log Output
-Use the `-D` option to specify the log file:
-```bash
-qemu-system-arm -d cpu_reset,in_asm -D qemu.log -M versatilepb -kernel firmware.elf
-```
-
-### Step 3: Analyze Log Output
-Review the log file to understand system behavior and identify issues.
-
-## Integration with Development Workflows
-
-Tracing and logging integrate well with embedded development tools:
-
-- **Bootloader Debugging**: Use tracing to debug bootloader processes
-- **Firmware Analysis**: Analyze firmware execution
-- **System Images**: Trace system behavior with custom built images
-
-## Advanced Tracing Techniques
-
-### Event Filtering
-Filter trace events to focus on specific areas of interest:
-```bash
-qemu-system-arm -trace events='!*timer*' -M versatilepb -kernel firmware.elf
-```
-
-### Performance Tracing
-Combine tracing with [QEMU Profiling](/kb/embedded/qemu/qemu-profiling/) for performance analysis:
-```bash
-qemu-system-arm -trace events='!*timer*!*irq*' -M versatilepb -kernel firmware.elf
-```
-
-### Device-Specific Tracing
-Trace specific devices or subsystems:
-```bash
-qemu-system-arm -trace events='sdhci_*' -M versatilepb -kernel firmware.elf
-```
-
-## Best Practices for Tracing and Logging
-1. **Focus on Relevant Events**: Enable only the trace events or logs relevant to your debugging or analysis goals.
-2. **Use Filters**: Filter trace and log output to reduce noise and focus on critical information.
-3. **Automate Analysis**: Use scripts or tools to automate the analysis of trace and log data.
-4. **Document Findings**: Maintain a record of trace and log analysis for future reference.
-
-## Related Topics
-
-For more information on related debugging and analysis topics:
-- [QEMU Architecture](/kb/embedded/qemu/qemu-architecture/) - Understand QEMU's internal structure
-- [QEMU GDB Debugging](/kb/embedded/qemu/qemu-gdb-debugging/) - Learn about GDB integration
-- [QEMU Debugging](/kb/embedded/qemu/qemu-debugging/) - General debugging techniques
-- [QEMU Profiling](/kb/embedded/qemu/qemu-profiling/) - Performance analysis techniques
-
-## Conclusion
-
-Tracing and logging in QEMU are powerful tools for debugging, performance analysis, and system understanding. By leveraging these features effectively, developers can gain valuable insights into their emulated systems, streamline development workflows, and ensure the reliability and performance of their software. Mastery of QEMU's tracing and logging capabilities is essential for modern embedded systems development.
-`

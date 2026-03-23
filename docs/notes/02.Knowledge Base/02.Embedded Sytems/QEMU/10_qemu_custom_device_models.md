@@ -6,146 +6,412 @@ permalink: /kb/embedded/qemu/qemu-custom-device-models/
 
 # QEMU Custom Device Models
 
-QEMU is a powerful emulator and virtualizer that supports a wide range of hardware architectures and devices. One of its most advanced features is the ability to create custom device models, allowing developers to emulate specific hardware components or peripherals. This capability is particularly useful for embedded systems development, where hardware-software co-design and testing are critical.
+This page builds a complete, compilable QEMU device model from scratch using the QEMU Object Model (QOM). It covers the full QOM lifecycle, MemoryRegion registration, interrupt delivery, chardev integration, VMState save/restore, and device properties.
 
-## Why Create Custom Device Models?
+---
 
-Custom device models in QEMU are useful for:
-- **Hardware Prototyping**: Simulate hardware components before they are physically available.
-- **Driver Development**: Test and debug device drivers in a controlled environment.
-- **System Integration**: Validate the interaction between software and hardware components.
-- **Testing and Debugging**: Reproduce hardware-specific issues without requiring physical devices.
+## QOM (QEMU Object Model) Foundations
 
-## Key Concepts in QEMU Device Modeling
+QOM is QEMU's C-based object system, providing single inheritance, interfaces, and typed properties without requiring C++. Every device, bus, machine, and CPU in QEMU is a QOM object.
 
-### 1. **QEMU Object Model (QOM)**
-- QOM is the object-oriented framework used in QEMU to define and manage devices.
-- Devices are represented as objects with properties, methods, and inheritance.
+### Core Types
 
-### 2. **Memory-Mapped I/O (MMIO) and Port I/O**
-- QEMU supports both MMIO and Port I/O for device communication.
-- MMIO maps device registers to specific memory addresses, while Port I/O uses specific I/O ports.
-
-### 3. **Device State**
-- Each device has a state structure that holds its internal data, such as registers and buffers.
-- The state is used to maintain the device's behavior during emulation.
-
-### 4. **Callbacks and Handlers**
-- Devices use callbacks to handle read, write, and interrupt events.
-- These callbacks define how the device interacts with the rest of the system.
-
-## Steps to Create a Custom Device Model
-
-### Step 1: Define the Device State
-Create a structure to represent the device's internal state. For example:
-```c
-typedef struct {
-    uint32_t register1;
-    uint32_t register2;
-    uint8_t buffer[256];
-} CustomDeviceState;
+```
+Object                  ← base of all objects
+└── DeviceState         ← all hardware devices
+    └── SysBusDevice    ← devices on the system bus (MMIO + IRQs)
+        └── PL011State  ← example: the PL011 UART
 ```
 
-### Step 2: Implement Device Callbacks
-Define read and write handlers for the device:
+### TypeInfo Registration
+
+Every QOM type is registered with a `TypeInfo` struct:
+
 ```c
-static uint64_t custom_device_read(void *opaque, hwaddr addr, unsigned size) {
-    CustomDeviceState *s = opaque;
-    // Handle read operation
-    return s->register1;
-}
-
-static void custom_device_write(void *opaque, hwaddr addr, uint64_t value, unsigned size) {
-    CustomDeviceState *s = opaque;
-    // Handle write operation
-    s->register1 = value;
-}
-```
-
-### Step 3: Register the Device
-Use QOM to register the device:
-```c
-static void custom_device_init(Object *obj) {
-    CustomDeviceState *s = CUSTOM_DEVICE(obj);
-    // Initialize device state
-    s->register1 = 0;
-    s->register2 = 0;
-}
-
-static const TypeInfo custom_device_info = {
-    .name = "custom-device",
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(CustomDeviceState),
-    .instance_init = custom_device_init,
+static const TypeInfo my_uart_info = {
+    .name          = TYPE_MY_UART,           /* "my-uart" */
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(MyUARTState),    /* allocate this much */
+    .instance_init = my_uart_instance_init,  /* constructor */
+    .class_init    = my_uart_class_init,     /* class vtable setup */
 };
 
-static void custom_device_register_types(void) {
-    type_register_static(&custom_device_info);
+static void my_uart_register_types(void)
+{
+    type_register_static(&my_uart_info);
 }
 
-type_init(custom_device_register_types);
+type_init(my_uart_register_types);          /* runs at QEMU startup */
 ```
 
-### Step 4: Integrate the Device
-Add the device to the QEMU machine description:
+`type_init` registers a constructor via a GCC `__attribute__((constructor))` section, so it runs before `main()`.
+
+### Object Lifecycle
+
+| Phase | Function | Description |
+|-------|----------|-------------|
+| Type registration | `class_init` | Sets up the class vtable once per type |
+| Memory allocation | (qom internal) | `g_malloc0(instance_size)` |
+| Instance init | `instance_init` | Initialize per-instance fields; no hardware yet |
+| Realization | `realize` / `DeviceClass.realize` | Connect to buses, map MMIO, connect IRQs |
+| Unrealization | `unrealize` | Unplug hot-removable devices |
+| Finalization | `instance_finalize` | Free resources |
+
+The key distinction: `instance_init` sets up data structures (it may not access other devices); `realize` performs board-level wiring and is called after all devices exist.
+
+---
+
+## Complete Device Example: `my-uart`
+
+A minimal but fully functional UART-like device that:
+- Has a 32-byte TX FIFO
+- Exposes MMIO registers (DATA, STATUS, CONTROL)
+- Fires an IRQ when TX data is written
+- Connects to a host chardev for I/O
+
+### Header-Style Declarations
+
+Using the `OBJECT_DECLARE_SIMPLE_TYPE` macro (QEMU >= 6.0):
+
 ```c
-DeviceState *dev = qdev_create(NULL, "custom-device");
-sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, 0x1000);
+/* my_uart.h */
+#ifndef MY_UART_H
+#define MY_UART_H
+
+#include "hw/sysbus.h"
+#include "chardev/char-fe.h"
+
+#define TYPE_MY_UART "my-uart"
+OBJECT_DECLARE_SIMPLE_TYPE(MyUARTState, MY_UART)
+
+/* Register offsets */
+#define MY_UART_REG_DATA    0x00  /* W: transmit byte; R: receive byte */
+#define MY_UART_REG_STATUS  0x04  /* R: status flags                   */
+#define MY_UART_REG_CTRL    0x08  /* R/W: control register             */
+#define MY_UART_REG_SIZE    0x10  /* total MMIO size                   */
+
+#define MY_UART_STATUS_TXRDY  (1u << 0)  /* TX ready (FIFO not full) */
+#define MY_UART_STATUS_RXRDY  (1u << 1)  /* RX byte available        */
+#define MY_UART_CTRL_TXIRQEN  (1u << 0)  /* enable TX interrupt      */
+#define MY_UART_CTRL_RXIRQEN  (1u << 1)  /* enable RX interrupt      */
+
+struct MyUARTState {
+    SysBusDevice parent_obj;    /* QOM parent — must be first */
+
+    MemoryRegion mmio;          /* MMIO region, 0x10 bytes        */
+    CharBackend  chr;           /* host chardev backend           */
+    qemu_irq     irq;           /* single interrupt output line   */
+
+    uint32_t ctrl;              /* CTRL register state            */
+    uint8_t  rxbuf;             /* one-byte RX buffer             */
+    bool     rx_pending;        /* byte available in rxbuf        */
+};
+
+#endif /* MY_UART_H */
 ```
 
-## Integration with Development Workflows
-
-### With Bootloaders
-Custom device models can be tested with bootloaders to verify bootloader detection and initialization of custom hardware.
-
-### With Firmware
-For firmware development, custom devices can be accessed through firmware protocols.
-
-### With Build Systems
-When building Linux images with build systems, custom device models can be accessed through kernel drivers.
-
-## Best Practices for Custom Device Models
-
-1. **Follow QOM Guidelines**: Use QOM to define and manage device properties and methods.
-2. **Test Incrementally**: Test each feature of the device model separately to isolate issues.
-3. **Use Logging**: Add debug logs to trace device behavior during emulation.
-4. **Document the Model**: Provide clear documentation for the device's functionality and usage.
-5. **Implement Error Handling**: Ensure the device model handles invalid accesses gracefully.
-
-## Advanced Custom Device Techniques
-
-### Memory Regions
-Properly implement memory regions for device registers:
+`OBJECT_DECLARE_SIMPLE_TYPE(MyUARTState, MY_UART)` expands to:
 ```c
-memory_region_init_io(&s->iomem, OBJECT(s), &custom_device_ops, s, "custom-device", 0x1000);
-sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
+typedef struct MyUARTState MyUARTState;
+DECLARE_INSTANCE_CHECKER(MyUARTState, MY_UART, TYPE_MY_UART)
 ```
 
-### Interrupt Handling
-Implement interrupt generation and handling for devices that require it:
+which defines `MY_UART(obj)` as a type-checked cast macro.
+
+### Implementation
+
 ```c
-qemu_irq parent_irq = qdev_get_gpio_in(DEVICE(s), 0);
+/* my_uart.c */
+#include "qemu/osdep.h"
+#include "hw/qdev-properties-system.h"
+#include "hw/registerfields.h"
+#include "my_uart.h"
+#include "qapi/error.h"
+
+/* ─── MemoryRegionOps ─────────────────────────────────────── */
+
+static uint64_t my_uart_read(void *opaque, hwaddr offset, unsigned size)
+{
+    MyUARTState *s = MY_UART(opaque);
+
+    switch (offset) {
+    case MY_UART_REG_DATA:
+        if (s->rx_pending) {
+            uint8_t val = s->rxbuf;
+            s->rx_pending = false;
+            /* Notify chardev: we can accept another byte */
+            qemu_chr_fe_accept_input(&s->chr);
+            return val;
+        }
+        return 0xFF;   /* no data: return 0xFF (undefined per spec) */
+
+    case MY_UART_REG_STATUS: {
+        uint32_t status = MY_UART_STATUS_TXRDY;  /* TX always ready */
+        if (s->rx_pending)
+            status |= MY_UART_STATUS_RXRDY;
+        return status;
+    }
+
+    case MY_UART_REG_CTRL:
+        return s->ctrl;
+
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "my-uart: unimplemented read at offset 0x%" HWADDR_PRIx "\n",
+                      offset);
+        return 0;
+    }
+}
+
+static void my_uart_write(void *opaque, hwaddr offset,
+                          uint64_t value, unsigned size)
+{
+    MyUARTState *s = MY_UART(opaque);
+
+    switch (offset) {
+    case MY_UART_REG_DATA: {
+        /* Transmit one byte via chardev */
+        uint8_t ch = (uint8_t)(value & 0xFF);
+        qemu_chr_fe_write_all(&s->chr, &ch, 1);
+        /* If TX interrupts are enabled, assert IRQ then deassert */
+        if (s->ctrl & MY_UART_CTRL_TXIRQEN) {
+            qemu_set_irq(s->irq, 1);
+            qemu_set_irq(s->irq, 0);
+        }
+        break;
+    }
+    case MY_UART_REG_CTRL:
+        s->ctrl = (uint32_t)value;
+        break;
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "my-uart: unimplemented write at offset 0x%" HWADDR_PRIx "\n",
+                      offset);
+        break;
+    }
+}
+
+static const MemoryRegionOps my_uart_ops = {
+    .read  = my_uart_read,
+    .write = my_uart_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+};
+
+/* ─── CharDev receive callback ───────────────────────────── */
+
+static int my_uart_chr_can_receive(void *opaque)
+{
+    MyUARTState *s = MY_UART(opaque);
+    return s->rx_pending ? 0 : 1;   /* accept one byte at a time */
+}
+
+static void my_uart_chr_receive(void *opaque, const uint8_t *buf, int size)
+{
+    MyUARTState *s = MY_UART(opaque);
+    s->rxbuf = buf[0];
+    s->rx_pending = true;
+    if (s->ctrl & MY_UART_CTRL_RXIRQEN) {
+        qemu_set_irq(s->irq, 1);
+    }
+}
+
+/* ─── VMState (save/restore) ─────────────────────────────── */
+
+static const VMStateDescription my_uart_vmstate = {
+    .name = "my-uart",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(ctrl,       MyUARTState),
+        VMSTATE_UINT8(rxbuf,       MyUARTState),
+        VMSTATE_BOOL(rx_pending,   MyUARTState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+/* ─── Device lifecycle ───────────────────────────────────── */
+
+static void my_uart_realize(DeviceState *dev, Error **errp)
+{
+    MyUARTState *s = MY_UART(dev);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+
+    /* Initialize MMIO region */
+    memory_region_init_io(&s->mmio, OBJECT(s), &my_uart_ops, s,
+                          TYPE_MY_UART, MY_UART_REG_SIZE);
+    sysbus_init_mmio(sbd, &s->mmio);
+
+    /* Initialize one IRQ output line */
+    sysbus_init_irq(sbd, &s->irq);
+
+    /* Register chardev callbacks */
+    qemu_chr_fe_set_handlers(&s->chr,
+                             my_uart_chr_can_receive,
+                             my_uart_chr_receive,
+                             NULL,   /* event callback */
+                             NULL,   /* backend changed */
+                             s, NULL, true);
+}
+
+static void my_uart_instance_init(Object *obj)
+{
+    MyUARTState *s = MY_UART(obj);
+    s->ctrl = 0;
+    s->rx_pending = false;
+}
+
+/* ─── Device properties ──────────────────────────────────── */
+
+static Property my_uart_properties[] = {
+    DEFINE_PROP_CHR("chardev", MyUARTState, chr),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
+/* ─── Class init (vtable setup) ──────────────────────────── */
+
+static void my_uart_class_init(ObjectClass *oc, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+    dc->realize = my_uart_realize;
+    dc->vmsd    = &my_uart_vmstate;
+    device_class_set_props(dc, my_uart_properties);
+    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+}
+
+/* ─── Type registration ──────────────────────────────────── */
+
+static const TypeInfo my_uart_info = {
+    .name          = TYPE_MY_UART,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(MyUARTState),
+    .instance_init = my_uart_instance_init,
+    .class_init    = my_uart_class_init,
+};
+
+static void my_uart_register_types(void)
+{
+    type_register_static(&my_uart_info);
+}
+
+type_init(my_uart_register_types)
 ```
 
-### DMA Operations
-For devices requiring direct memory access, implement appropriate DMA handling mechanisms.
+---
 
-## Performance Considerations
+## Integrating the Device into a Machine
 
-When implementing custom device models:
-- Minimize the overhead of device callbacks
-- Use efficient data structures for device state
-- Consider the impact on overall system performance
-- For performance analysis, refer to [QEMU Performance Optimization](/kb/embedded/qemu/qemu-performance-optimization/)
+In a machine's init function, instantiate and wire up the device:
 
-## Debugging Custom Devices
+```c
+static void my_board_init(MachineState *machine)
+{
+    /* ... create CPU, RAM, etc. ... */
 
-Custom device models can be debugged using:
-- [QEMU GDB Debugging](/kb/embedded/qemu/qemu-gdb-debugging/) for code-level debugging
-- [QEMU Tracing and Logging](/kb/embedded/qemu/qemu-tracing-logging/) for device behavior analysis
-- Custom logging within the device implementation
+    /* Create and realize the UART */
+    DeviceState *uart = qdev_new(TYPE_MY_UART);
 
-## Conclusion
+    /* Set the chardev property to the first -serial chardev */
+    qdev_prop_set_chr(uart, "chardev", serial_hd(0));
 
-Creating custom device models in QEMU is a powerful way to emulate hardware components and validate software-hardware interactions. By leveraging QEMU's flexible architecture and QOM framework, developers can build accurate and efficient device models tailored to their specific needs. Custom device models become an essential part of the embedded systems development workflow when used with various development tools. Mastery of this process is essential for embedded systems development and hardware-software co-design.
-`
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(uart), &error_fatal);
+
+    /* Map MMIO at board-specific address */
+    sysbus_mmio_map(SYS_BUS_DEVICE(uart), 0, 0x40001000);
+
+    /* Connect IRQ to NVIC input 3 */
+    sysbus_connect_irq(SYS_BUS_DEVICE(uart), 0,
+                       qdev_get_gpio_in(nvic, 3));
+}
+```
+
+---
+
+## VMState: Save and Restore
+
+`VMStateDescription` describes how to serialize device state for live snapshots and migration. `VMSTATE_*` macros handle common types:
+
+| Macro | Type |
+|-------|------|
+| `VMSTATE_UINT8(field, state)` | `uint8_t` |
+| `VMSTATE_UINT32(field, state)` | `uint32_t` |
+| `VMSTATE_UINT32_ARRAY(field, state, n)` | `uint32_t[n]` |
+| `VMSTATE_BOOL(field, state)` | `bool` |
+| `VMSTATE_STRUCT(field, state, ver, vmsd, type)` | nested struct |
+| `VMSTATE_FIFO8(field, state)` | `Fifo8` |
+| `VMSTATE_END_OF_LIST()` | terminator |
+
+QEMU automatically serializes these fields on `savevm` and restores them on `loadvm`. The `version_id` and `minimum_version_id` handle forward/backward compatibility.
+
+---
+
+## Device Properties
+
+Properties allow machine code or command-line options to configure device parameters:
+
+```c
+static Property my_uart_properties[] = {
+    DEFINE_PROP_CHR("chardev",  MyUARTState, chr),
+    DEFINE_PROP_UINT32("baud",  MyUARTState, baud_rate, 115200),
+    DEFINE_PROP_BOOL("fifo",    MyUARTState, fifo_enabled, true),
+    DEFINE_PROP_END_OF_LIST(),
+};
+```
+
+Set from machine code:
+```c
+qdev_prop_set_uint32(uart, "baud", 9600);
+```
+
+Set from command line (`-global` option):
+```bash
+-global my-uart.baud=9600
+```
+
+---
+
+## Building the Device into QEMU
+
+Add the device to the QEMU meson build:
+
+In `hw/char/meson.build`:
+```python
+system_ss.add(when: 'CONFIG_MY_UART', if_true: files('my_uart.c'))
+```
+
+In `hw/char/Kconfig`:
+```
+config MY_UART
+    bool
+    select SERIAL
+```
+
+In the machine's `Kconfig`:
+```
+select MY_UART
+```
+
+The device is then compiled into `qemu-system-arm` (or whichever target selects it) and available as `TYPE_MY_UART`.
+
+---
+
+## Inspecting Devices at Runtime
+
+```bash
+# List all realized devices (QOM tree)
+(qemu) info qtree
+
+# Show memory region tree
+(qemu) info mtree
+
+# Show device by type
+(qemu) qom-list /machine/peripheral/my-uart[0]
+
+# Read a property via QMP
+{"execute": "qom-get",
+ "arguments": {"path": "/machine/peripheral/my-uart[0]",
+               "property": "baud"}}
+```

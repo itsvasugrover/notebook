@@ -26,6 +26,11 @@
   */
 }
 
+/** Hide back-to-top button (theme option backToTop:false is ignored by component) */
+.vp-back-to-top {
+    display: none !important;
+}
+
 /** Dark mode */
 [data-theme="dark"] {
     /*

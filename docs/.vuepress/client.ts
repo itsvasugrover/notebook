@@ -9,7 +9,7 @@ import PageContextMenu from 'vuepress-theme-plume/features/PageContextMenu.vue'
 
 // import CustomComponent from './theme/components/Custom.vue'
 
-// import './theme/styles/custom.css'
+import './theme/styles/custom.css'
 
 export default defineClientConfig({
   enhance({ app }) {

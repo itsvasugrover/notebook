@@ -4,36 +4,119 @@ createTime: 2025/12/21 22:21:19
 permalink: /kb/embedded/yocto/packagegroups/
 ---
 
-# What is Packagegroup in the Yocto Project?
+# Packagegroups
 
-A packagegroup is a special type of recipe whose sole purpose is to group together other packages to simplify image creation.
+## What a Packagegroup Is
 
-Why use it? Instead of listing dozens of individual packages in your IMAGE_INSTALL variable, you create a packagegroup (e.g., packagegroup-my-iot-core) that includes them all. You then only add packagegroup-my-iot-core to IMAGE_INSTALL.
+A packagegroup is a special recipe whose sole purpose is to declare a named collection of packages. It has no source to fetch or compile — only runtime dependencies.
 
-Structure of a Packagegroup Recipe (packagegroup-my-demo.bb):
+**Why use it**: Instead of listing 20 individual packages in every image recipe and in `local.conf`, you maintain one packagegroup. Every image that needs those 20 packages just includes the one packagegroup.
+
+## Minimal Packagegroup Recipe
 
 ```bash
-SUMMARY = "My demo package group"
-LICENSE = "MIT"
+# meta-myproduct/recipes-core/packagegroups/packagegroup-my-iot-core.bb
 
-# Inherit the packagegroup class - this is mandatory!
+SUMMARY = "Core packages for my IoT product"
+LICENSE  = "MIT"
+
+# Mandatory: inherit the packagegroup class
 inherit packagegroup
 
-# Define the packages this group will pull in
+# RDEPENDS:${PN} lists every package this group pulls in
 RDEPENDS:${PN} = " \
-    hello \
-    htop \
+    myapp \
     nginx \
-    my-custom-app \
+    python3 \
+    openssh \
+    curl \
+    tzdata \
 "
 
-# Optional: Conditionally include packages
-RDEPENDS:${PN}:append = " ${@bb.utils.contains('DISTRO_FEATURES', 'x11', 'firefox', '', d)}"
+# Optional: conditionally include packages based on DISTRO_FEATURES
+RDEPENDS:${PN}:append = " \
+    ${@bb.utils.contains('DISTRO_FEATURES', 'x11', 'matchbox-wm', '', d)} \
+    ${@bb.utils.contains('DISTRO_FEATURES', 'wayland', 'weston', '', d)} \
+"
 ```
 
-### Key Points: Packagegroup
+## Sub-package Splitting in Packagegroups
 
-- A logical collection of packages defined in a single recipe.
-- Must inherit packagegroup.
-- Uses `RDEPENDS:${PN}` to list all the packages to be included.
-- Simplifies conf/local.conf and image recipe files by reducing clutter.
+A packagegroup recipe can define multiple packages, each with its own dependency list. This lets images include only the subset they need:
+
+```bash
+# packagegroup-my-debug.bb
+SUMMARY = "Debug tools packagegroup"
+LICENSE  = "MIT"
+inherit packagegroup
+
+# Define multiple sub-packages
+PACKAGES = "${PN} ${PN}-extended ${PN}-profile"
+
+# Base debug set
+RDEPENDS:${PN} = "\
+    gdb \
+    strace \
+    ltrace \
+"
+
+# Extended debug set (includes the base)
+RDEPENDS:${PN}-extended = "\
+    ${PN} \
+    valgrind \
+    tcpdump \
+    iperf3 \
+"
+
+# Profiling set
+RDEPENDS:${PN}-profile = "\
+    perf \
+    lttng-tools \
+    babeltrace2 \
+"
+```
+
+Usage in an image:
+
+```bash
+IMAGE_INSTALL:append = " packagegroup-my-debug-extended"
+```
+
+## RDEPENDS vs RRECOMMENDS vs RSUGGESTS
+
+| Variable | Behaviour |
+|----------|-----------|
+| `RDEPENDS:${PN}` | Hard dependency — the package manager **requires** these to be installed when this package is installed |
+| `RRECOMMENDS:${PN}` | Soft dependency — installed automatically if available, but the install succeeds without them |
+| `RSUGGESTS:${PN}` | Informational only — not installed automatically; surfaced as suggestions by the package manager |
+| `RCONFLICTS:${PN}` | Cannot be installed at the same time as these packages |
+| `RREPLACES:${PN}` | This package replaces (and can uninstall) these packages |
+
+```bash
+# In a packagegroup or any recipe:
+RDEPENDS:${PN}    = "libssl"        # MUST be present
+RRECOMMENDS:${PN} = "ca-certificates"  # installed if available
+RSUGGESTS:${PN}   = "curl"          # just a hint
+```
+
+## Packagegroup Best Practices
+
+```bash
+# 1. Use packagegroups to build logical product compositions:
+#    packagegroup-product-core     ← always installed
+#    packagegroup-product-debug    ← included in dev builds
+#    packagegroup-product-ota      ← OTA update client packages
+
+# 2. Refence from the image recipe:
+IMAGE_INSTALL = " \
+    packagegroup-core-boot \
+    packagegroup-my-iot-core \
+    ${@bb.utils.contains('IMAGE_FEATURES', 'tools-debug', \
+        'packagegroup-my-debug', '', d)} \
+"
+
+# 3. Build and inspect:
+bitbake packagegroup-my-iot-core
+# Check what would be installed:
+bitbake -e packagegroup-my-iot-core | grep ^RDEPENDS
+```

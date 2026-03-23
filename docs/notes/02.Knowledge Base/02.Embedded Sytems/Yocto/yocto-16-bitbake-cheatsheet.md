@@ -4,277 +4,214 @@ createTime: 2025/12/21 22:21:19
 permalink: /kb/embedded/yocto/bitbake-cheatsheet/
 ---
 
-# BitBake Cheatsheet and Useful Commands
+# BitBake Cheatsheet
 
-## Essential BitBake Commands
-
-### Build Commands
+## Build Commands
 
 ```bash
-# Build a target (recipe, image, packagegroup)
-bitbake <target-name>
-
-# Common examples:
+# Build a target (image, recipe, packagegroup)
 bitbake core-image-minimal
-bitbake hello
-bitbake packagegroup-my-demo
 bitbake virtual/kernel
+bitbake myapp
+bitbake packagegroup-my-apps
 
-# Build specific task of a recipe
-bitbake -c <task> <target>
-bitbake -c compile hello
-bitbake -c install hello
+# Run a specific task of a recipe
+bitbake -c fetch      myapp
+bitbake -c compile    myapp
+bitbake -c install    myapp
+bitbake -c package    myapp
 
-# Force specific task (ignore sstate cache)
-bitbake -c <task> -f <target>
+# Force re-run of a task (ignore sstate cache for that task)
+bitbake -c compile -f myapp
+
+# Force complete rebuild (clean sstate, re-fetch, recompile)
+bitbake -c cleanall   myapp && bitbake myapp
 ```
 
-### Development & Debugging Commands
+## Cleaning Commands (Least to Most Aggressive)
 
 ```bash
-# Interactive kernel configuration
-bitbake -c menuconfig virtual/kernel
+# Remove build artifacts, keep downloaded source and sstate
+bitbake -c clean myapp
 
-# Generate kernel config fragment from changes
-bitbake -c diffconfig virtual/kernel
+# Remove sstate entry for a recipe (forces rebuild from source next time)
+bitbake -c cleansstate myapp
 
-# Open devshell for a recipe (debug build environment)
-bitbake -c devshell <recipe>
+# Remove everything: sstate, WORKDIR, downloaded source
+bitbake -c cleanall myapp
 
-# List tasks for a recipe
-bitbake -c listtasks <recipe>
+# Nuclear: remove entire tmp/ directory (all build artefacts, keeps downloads)
+rm -rf tmp/
 
-# Check recipe syntax
-bitbake -p <recipe>
-
-# Show environment for a recipe
-bitbake -e <recipe> | grep <variable>
-
-# Show all recipe versions available
-bitbake -s | grep <recipe>
+# Full reset (removes tmp/, sstate-cache/, keeps downloads/)
+rm -rf tmp/ sstate-cache/
 ```
 
-### Information & Analysis Commands
+## Inspection and Debugging
 
 ```bash
-# Show dependency graph
-bitbake -g <target>
+# Dump the full variable environment for a recipe (most useful debug command)
+bitbake -e myapp
+bitbake -e myapp | grep ^SRC_URI=
+bitbake -e myapp | grep ^WORKDIR=
+bitbake -e myapp | grep ^do_compile  # show the actual task function
 
-# Show what provides a specific file/package
-bitbake -g <target> && cat pn-depends.dot | grep -i <package>
+# Open an interactive shell with the recipe's full build environment
+# (CC, CFLAGS, LDFLAGS, PKG_CONFIG_PATH, etc. all set)
+bitbake -c devshell myapp
 
-# Check build statistics
-bitbake -S printdiff <target>
+# List all tasks defined for a recipe
+bitbake -c listtasks myapp
 
-# Show all recipe providers for a target
-bitbake -s | grep <pattern>
+# Show which version of each recipe BitBake will use
+bitbake -s
+bitbake -s | grep openssl
+
+# Parse all recipes and check for syntax errors
+bitbake -p
 ```
 
-### Layer Management Commands
+## Dependency Analysis
+
+```bash
+# Generate dependency graph (.dot files)
+bitbake -g core-image-minimal
+# Produces: task-depends.dot, pn-buildlist
+
+# Visualise
+dot -Tsvg task-depends.dot -o task-deps.svg
+
+# Check what would be included in an image
+cat pn-buildlist
+
+# Find what recipe provides a virtual target or a package name
+bitbake -e virtual/kernel | grep ^PN=
+bitbake-layers show-recipes | grep "^openssl"
+
+# Show recipe-level DEPENDS (build-time) graph
+bitbake -g myapp && cat pn-depends.dot
+```
+
+## sstate-cache Debugging
+
+```bash
+# Compare two task signatures to find why a rebuild was triggered
+bitbake-dumpsig tmp/stamps/.../do_compile.sigdata.abc123
+bitbake-dumpsig -d tmp/stamps/.../do_compile.sigdata.abc123 \
+                   tmp/stamps/.../do_compile.sigdata.def456
+
+# Show what variables contributed to a task's hash
+bitbake-diffsigs tmp/stamps/.../do_compile.sigdata.abc123 \
+                 tmp/stamps/.../do_compile.sigdata.def456
+
+# Check sstate-cache hit rate during build (look for 'Setscene')
+bitbake core-image-minimal 2>&1 | grep -i setscene | wc -l
+```
+
+## Layer Management
 
 ```bash
 # Create a new layer
-bitbake-layers create-layer <layer-path>
+bitbake-layers create-layer meta-myproduct
 
-# Add a layer to bblayers.conf
-bitbake-layers add-layer <layer-path>
+# Add a layer (validates LAYERDEPENDS and LAYERSERIES_COMPAT)
+bitbake-layers add-layer /path/to/meta-myproduct
 
-# Remove a layer from bblayers.conf
-bitbake-layers remove-layer <layer-path>
+# Remove a layer
+bitbake-layers remove-layer /path/to/meta-myproduct
 
-# Show current layer structure
+# Show all registered layers with their priorities
 bitbake-layers show-layers
 
-# Show recipes and their layers
+# Show all recipes and which layer provides each
 bitbake-layers show-recipes
+bitbake-layers show-recipes | grep "^busybox"
 
-# Show overlapped recipes (multiple providers)
+# Show recipes overridden by a higher-priority layer
 bitbake-layers show-overlayed
+
+# Show which appends apply to a recipe
+bitbake-layers show-appends | grep busybox
 ```
 
-### Build Optimization & Cleanup Commands
-
-#### Incremental Build Speed
+## SDK and Toolchain
 
 ```bash
-# Only rebuild specific recipe (uses sstate cache for dependencies)
-bitbake <recipe>
-
-# Force rebuild of specific recipe (ignore sstate)
-bitbake -c cleanall <recipe> && bitbake <recipe>
-
-# Reconfigure and rebuild (for autotools/cmake recipes)
-bitbake -c reconfigure <recipe>
-```
-
-#### Cleaning Commands (Most to Least Aggressive)
-
-```bash
-# Remove everything for a specific recipe (source, work directory, output)
-bitbake -c cleanall <recipe>
-
-# Remove work directory for a recipe (keeps downloaded source)
-bitbake -c cleansstate <recipe>
-
-# Clean shared state cache for a recipe (forces rebuild from source)
-bitbake -c cleansstate <recipe>
-
-# Remove temporary work directory for a recipe
-bitbake -c clean <recipe>
-
-# Remove downloaded source files for a recipe
-bitbake -c cleansrc <recipe>
-
-# Nuclear option - remove entire tmp and sstate-cache (VERY SLOW REBUILD)
-rm -rf tmp/ sstate-cache/
-
-# Remove downloads but keep build cache (safe cleanup)
-rm -rf downloads/
-```
-
-#### Selective Cleaning Patterns
-
-```bash
-# Clean all kernel-related items
-bitbake -c cleanall virtual/kernel
-
-# Clean entire image and dependencies
-bitbake -c cleanall core-image-minimal
-
-# Clean multiple recipes
-bitbake -c cleanall recipe1 recipe2 recipe3
-```
-
-## Best Practices for Fast Builds
-
-### 1. Configuration Optimizations
-
-In local.conf:
-
-```bash
-# Enable parallel builds (use all CPU cores)
-BB_NUMBER_THREADS = "8"
-PARALLEL_MAKE = "-j 8"
-
-# Optimize build directory (use fast storage)
-TMPDIR = "/path/to/fast/ssd/tmp"
-
-# Enable memory optimization
-BB_ENV_PASSTHROUGH_ADDITIONS = "MAKEFLAGS"
-
-# Use package feeds for rapid application development
-INHERIT += "own-mirrors"
-SOURCE_MIRROR_URL = "file:///path/to/shared/sources/"
-SSTATE_MIRROR_URL = "file:///path/to/shared/sstate-cache/"
-```
-
-### 2. Shared State Cache (sstate) Best Practices
-
-```bash
-# Keep sstate-cache on fast storage
-# Use network share for team development
-SSTATE_MIRROR ?= "file:///path/to/network/sstate-cache/PATH;downloads=yes"
-
-# Preserve sstate between builds
-# Don't clean sstate-cache unnecessarily
-
-# Share sstate across projects
-SSTATE_DIR = "/shared/sstate-cache"
-```
-
-### 3. Disk Space Management
-
-```bash
-# Regular cleanup script (save in clean-yocto.sh)
-#!/bin/bash
-echo "Cleaning Yocto build..."
-# Remove failed build work directories
-find tmp/work/* -maxdepth 1 -name "temp" -type d -exec rm -rf {} + 2>/dev/null
-
-# Keep downloads, keep sstate, clean failed builds only
-du -sh tmp/ downloads/ sstate-cache/
-
-# Optional: Remove old source archives (risky)
-# find downloads/ -type f -mtime +30 -delete
-```
-
-### Development Workflow Cheatsheet
-
-#### Rapid Application Development Cycle
-
-```bash
-# 1. Initial build
-bitbake core-image-minimal
-
-# 2. Develop your application
-cd /path/to/your/app
-
-# 3. Build just your recipe
-bitbake my-custom-app
-
-# 4. Test in QEMU or on hardware
+# Generate standard SDK
 bitbake -c populate_sdk core-image-minimal
-# or
-bitbake core-image-minimal -c rootfs
+# Output: tmp/deploy/sdk/*.sh
 
-# 5. Repeat steps 2-4 rapidly
+# Generate extensible SDK (includes devtool)
+bitbake -c populate_sdk_ext core-image-minimal
+
+# devtool: add a new recipe from source
+devtool add myapp /path/to/source
+
+# devtool: build and deploy to a running target
+devtool build myapp
+devtool deploy-target myapp root@192.168.1.10
+
+# devtool: finish recipe (commits changes back to your layer)
+devtool finish myapp meta-myproduct
 ```
 
-#### Debugging Common Issues
+## Kernel Specific
 
 ```bash
-# Recipe fails to build
-bitbake -c cleanall <failing-recipe>
-bitbake -c devshell <failing-recipe>  # Then run commands manually
+# Interactive kernel config
+bitbake -c menuconfig virtual/kernel
 
-# Dependency issues
-bitbake -g <target>
-cat pn-depends.dot | dot -Tpng > deps.png
+# Generate config fragment from your changes
+bitbake -c diffconfig virtual/kernel
 
-# License checksum error
-bitbake -c cleansrc <recipe>  # Then rebuild
+# Verify config fragments were applied correctly
+bitbake -c kernel_configcheck virtual/kernel
 
-# Patch fails to apply
-bitbake -c cleanall <recipe>
-# Check patch in tmp/work/.../git/ for issues
+# Build only the kernel (skip rootfs and image steps)
+bitbake virtual/kernel
 ```
 
-#### Useful One-Liners
+## QEMU / Testing
 
 ```bash
-# Find what recipe provides a file
-find tmp/work/*/*/*/image/ -name "filename" 2>/dev/null
+# Run the image in QEMU (after building)
+runqemu qemux86-64 nographic
+runqemu qemuarm64 
+runqemu qemux86-64 core-image-minimal
 
-# Check recipe variables
-bitbake -e <recipe> | grep ^S=  # Source directory
-bitbake -e <recipe> | grep ^WORKDIR=  # Work directory
-bitbake -e <recipe> | grep ^FILES_  # Package files mapping
+# Run QEMU with GDB attached
+runqemu qemux86-64 nographic slirp gdb
 
-# Build history analysis
-cat buildhistory/package/*/latest/<package>/files
-
-# Check package contents
-oe-pkgdata-util list-pkgs | grep <pattern>
-oe-pkgdata-util list-pkg-files <package>
+# Check build for CVE vulnerabilities
+INHERIT += "cve-check"  # add to local.conf
+bitbake core-image-minimal -c cve_check
 ```
 
-#### Quick Reference: File Locations
+## Quick File Location Reference
 
 ```bash
-# Build outputs
-tmp/deploy/images/<machine>/  # Final images
-tmp/deploy/ipk/  # Individual packages
-tmp/deploy/sdk/  # SDK installer
+# Final images
+tmp/deploy/images/<MACHINE>/
 
-# Build working directories
-tmp/work/<arch>/<recipe>/<version>/  # Recipe build area
-tmp/work/<arch>/<recipe>/<version>/temp/  # Log files
-tmp/work/<arch>/<recipe>/<version>/image/  # Installed files
+# Per-recipe build directory
+tmp/work/<arch>/<recipe>/<version>/
 
-# Caches
-tmp/sstate-control/  # Shared state management
-tmp/stamps/  # Task stamps
-downloads/  # Downloaded sources
+# Build logs (check first when a recipe fails)
+tmp/work/<arch>/<recipe>/<version>/temp/log.do_compile
+tmp/work/<arch>/<recipe>/<version>/temp/run.do_compile
+
+# SDK output
+tmp/deploy/sdk/
+
+# Package feeds
+tmp/deploy/rpm/     # or ipk/ or deb/
+
+# sstate-cache
+sstate-cache/
+
+# Downloaded sources
+downloads/
+
+# Task stamps (hash-based rebuild tracking)
+tmp/stamps/
 ```
-
-**Pro Tip:** Always keep downloads/ and sstate-cache/ between builds when possible. These are your biggest time-savers for incremental builds!

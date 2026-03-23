@@ -6,58 +6,128 @@ permalink: /kb/embedded/yocto/recipes/
 
 # BitBake Recipes (.bb files)
 
-A recipe is the fundamental building block, a .bb file that contains all the information needed by BitBake to build a single package (e.g., an application, a library, the kernel, an image).
+## Recipe Anatomy
 
-Think of it as a instruction manual for building one piece of software.
+A recipe is a text file (`.bb`) that describes how to obtain, build, and package a single software component. The filename encodes the package name and version: `bash_5.2.21.bb` means package `bash`, version `5.2.21`.
 
-Key Elements of a Recipe:
+Complete annotated recipe skeleton:
 
-- Recipe Header:
-  - SUMMARY: A short description.
-  - DESCRIPTION: A longer description.
-  - HOMEPAGE: The upstream software's website.
-  - BUGTRACKER: Where to report bugs.
-- License and Version:
-  - LICENSE: The software's license (e.g., "GPL-2.0-only", "MIT").
-  - LIC_FILES_CHKSUM: A checksum of the license file in the source code. This is a critical security and integrity check to ensure the license hasn't changed.
-  - SRC_URI: The URL to fetch the source code from (http, git, svn, local file). This is one of the most important variables.
-  - SRCREV: The specific revision to use if fetching from a SCM like Git (a commit hash).
-  - PV: Package Version. Can be set manually or automatically parsed from the recipe filename (e.g., bash_4.4.bb has PV = "4.4").
-- Dependencies:
-  - DEPENDS: Build-time dependencies. These must be built and available before this recipe's compilation task starts. (e.g., cmake-native, libssl).
-  - `RDEPENDS:${PN}`: Runtime dependencies. These packages must be installed on the target device for this package to run. (e.g., a Python script has `RDEPENDS:${PN}` = "python3").
-- Tasks and Functions:
-  - The real work happens in task functions, which are shell or Python scripts.
-  - do_configure(): Prepares the build (e.g., runs cmake or ./configure).
-  - do_compile(): Compiles the source code (e.g., runs make).
-  - do_install(): Installs the built artifacts into a staging directory (`${D}`). This is what will end up in the final image.
-  - You can override these functions to add custom steps.
+```bash
+# ─── Identity ───────────────────────────────────────────────────────────────────────────
+SUMMARY     = "GNU Bourne Again Shell"
+DESCRIPTION = "Bash is the shell, or command language interpreter."
+HOMEPAGE    = "http://tiswww.case.edu/php/chet/bash/bashtop.html"
+BUGTRACKER  = "http://savannah.gnu.org/bugs/?group=bash"
 
-Example Skeleton of a Recipe (myapp_1.0.bb):
+# ─── License ───────────────────────────────────────────────────────────────────────────
+LICENSE = "GPL-3.0-only"
+# Checksum of the license file IN THE SOURCE CODE.
+# If upstream changes the license, the build fails until you update this.
+LIC_FILES_CHKSUM = "file://COPYING;md5=d32239bcb673463ab874e80d47fae504"
 
-```bb
-SUMMARY = "My custom application"
-LICENSE = "CLOSED"
-LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/GPL-2.0-only;md5=801f80980d171dd6425610833a22dbe6"
+# ─── Versioning ─────────────────────────────────────────────────────────────────────
+PV = "5.2.21"  # Package Version (usually from filename)
+PE = "0"       # Package Epoch  (increment if version goes backwards)
+PR = "r0"      # Package Revision (increment for packaging-only changes)
 
-SRC_URI = "git://git@github.com/company/myapp.git;protocol=ssh;branch=main"
-SRCREV = "a1b2c3d4e5f67890..."
+# ─── Source Fetching ────────────────────────────────────────────────────────────────
+SRC_URI = "https://ftp.gnu.org/gnu/bash/bash-${PV}.tar.gz \
+           file://0001-fix-local-var-crash.patch \
+           file://bash-extra-config.cfg"
+# Hash of the tarball (sha256 preferred)
+SRC_URI[sha256sum] = "a139c166df7ff4471c5e0733051642ee5556a1f8..."
 
-DEPENDS = "qtbase"
-RDEPENDS:${PN} = "libconfig"
+# For git sources:
+# SRC_URI = "git://github.com/user/repo.git;protocol=https;branch=main"
+# SRCREV  = "a1b2c3d4e5f6..."   # exact commit; never use a moving tag
+# S       = "${WORKDIR}/git"   # default for git fetcher
 
-S = "${WORKDIR}/git"
+S = "${WORKDIR}/bash-${PV}"    # Where the extracted source lives
 
-do_install() {
-    install -d ${D}${bindir}
-    install -m 0755 ${S}/myapp ${D}${bindir}
+# ─── Dependencies ──────────────────────────────────────────────────────────────────────
+DEPENDS  = "ncurses"                     # build-time: sysroot populated before do_configure
+RDEPENDS:${PN} = "ncurses-terminfo-base" # runtime: installed on target with this package
+
+# ─── Build System ────────────────────────────────────────────────────────────────────
+# Most recipes inherit a class rather than redefining every task:
+inherit autotools  # Provides: do_configure (./configure), do_compile (make),
+                   #           do_install (make install DESTDIR=${D})
+
+EXTRA_OECONF = "--without-bash-malloc \
+                --disable-rpath"
+
+# ─── Package Splitting ──────────────────────────────────────────────────────────────────
+PACKAGES = "${PN}-dbg ${PN}-staticdev ${PN}-dev ${PN}-doc ${PN} ${PN}-locale"
+FILES:${PN}     = "${bindir}/bash ${bindir}/sh"
+FILES:${PN}-dev = "${includedir}/*.h"
+
+# ─── PACKAGECONFIG ────────────────────────────────────────────────────────────────────
+# Format: PACKAGECONFIG[flag] = "if-on,if-off,DEPENDS,RDEPENDS"
+PACKAGECONFIG ??= ""
+PACKAGECONFIG[readline] = "--with-installed-readline,--without-readline,readline"
+# Enable readline only if distro includes it:
+PACKAGECONFIG:append = " ${@bb.utils.filter('DISTRO_FEATURES', 'readline', d)}"
+
+# ─── Custom Task Overrides ───────────────────────────────────────────────────────────────
+do_install:append() {
+    ln -sf bash ${D}${bindir}/sh
 }
 ```
 
-## Key Points: Recipes (.bb)
+## SRC_URI Fetcher Schemes
 
-- The instruction manual for building a single package.
-- SRC_URI defines where to get the source code.
-- LIC_FILES_CHKSUM is a critical security feature.
-- DEPENDS (build-time) vs. RDEPENDS (run-time).
-- Task functions (do_compile, do_install) define the build steps.
+| Scheme | Example | Notes |
+|--------|---------|-------|
+| `https://` | tarball download | Requires `SRC_URI[sha256sum]` |
+| `git://` | `git://github.com/u/r.git;protocol=https;branch=main` | Use `SRCREV` for exact commit |
+| `file://` | `file://mypatch.patch` | Searches `FILESPATH` dirs |
+| `npm://` | `npm://registry.npmjs.org;package=express` | `meta-nodejs` fetcher |
+| `gitsm://` | git with submodules | Auto-fetches submodules |
+| `crate://` | `crate://crates.io/serde/1.0` | Rust — `meta-rust` fetcher |
+
+## Recipe Version Selection
+
+BitBake selects which recipe version to build in this priority order:
+
+1. `PREFERRED_VERSION_bash = "5.2%"` in `local.conf` or `distro.conf` — explicit pin (the `%` is a glob)
+2. Highest version number among available `.bb` files
+3. `DEFAULT_PREFERENCE` variable in the recipe (rarely used)
+
+```bash
+# A git recipe tracking a specific commit with an auto-incrementing version string
+PV = "1.0+git${SRCPV}"   # SRCPV = git describe output
+SRCREV = "a1b2c3..."      # Pin to exact commit in production; NEVER use AUTOREV
+```
+
+## Native vs Target Recipes
+
+```bash
+# Build this recipe for the HOST machine (e.g., a code generator tool)
+inherit native
+# Outputs to tmp/sysroots-components/x86_64/ — not in target image
+# Usage in another recipe: DEPENDS = "my-codegen-native"
+
+# Generate both target and native variants from one .bb file:
+BBCLASSEXTEND = "native nativesdk"
+# Produces:  my-tool_1.0.bb          (target build)
+#            my-tool-native_1.0.bb   (host build for DEPENDS)
+#            my-tool-nativesdk_1.0.bb (inside the SDK)
+```
+
+## The WORKDIR Structure
+
+```
+tmp/work/cortexa72-poky-linux/bash/5.2.21-r0/
+├── bash-5.2.21/          ← S: source tree, post-patch
+├── build/                ← B: out-of-tree build directory
+├── image/                ← D: fake rootfs (populated by do_install)
+│   └── usr/bin/bash
+├── deploy-rpms/          ← generated .rpm packages
+├── temp/
+│   ├── log.do_fetch          ← fetcher output
+│   ├── log.do_compile        ← FIRST place to look on build failure
+│   └── run.do_compile        ← the actual shell script that was executed
+└── sysroot-destdir/      ← headers/libs exported to STAGING_DIR for dependants
+```
+
+When a build fails, `temp/log.do_compile` and `temp/run.do_compile` are the first diagnostic files to examine.

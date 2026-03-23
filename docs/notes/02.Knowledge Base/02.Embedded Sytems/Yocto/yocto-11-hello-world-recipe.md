@@ -6,79 +6,143 @@ permalink: /kb/embedded/yocto/hello-world-recipe/
 
 # Writing a "Hello World" Recipe
 
-Let's create a simple recipe for a "Hello World" C program.
+## The Complete Workflow
 
-1. Create the Recipe Directory Structure:
-   Inside your meta-hello layer:
+This section builds a "Hello World" C program as a proper Yocto recipe: from source through recipe to image inclusion and debugging.
 
-   ```bash
-   mkdir -p recipes-hello/hello/files
-   ```
+### Step 1: Directory Structure
 
-   - recipes-hello/: Category directory for all "hello" related recipes.
-   - hello/: Specific recipe directory.
-   - files/: Directory for storing patches and source files.
+```bash
+# Inside your custom layer
+mkdir -p meta-myproduct/recipes-hello/hello/files
+```
 
-2. Write the "Hello World" Source Code:
-   Create recipes-hello/hello/files/hello.c:
+```
+meta-myproduct/
+└── recipes-hello/
+    └── hello/
+        ├── hello_1.0.bb       ← the recipe
+        └── files/
+            └── hello.c           ← local source file
+```
 
-   ```c
-   #include <stdio.h>
+### Step 2: The Source Code
 
-   int main() {
-       printf("Hello, Yocto World!\n");
-       return 0;
-   }
-   ```
+```c
+/* meta-myproduct/recipes-hello/hello/files/hello.c */
+#include <stdio.h>
 
-3. Write the Recipe File:
-   Create recipes-hello/hello/hello_1.0.bb:
+int main(void) {
+    printf("Hello, Yocto World!\n");
+    return 0;
+}
+```
 
-   ```bash
-   SUMMARY = "A simple Hello World program"
-   LICENSE = "GPL-2.0-only"
-   LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/GPL-2.0-only;md5=801f80980d171dd6425610833a22dbe6"
+### Step 3: The Recipe
 
-   # Tell bitbake where to find the source. The 'file://' protocol looks in the 'files' subdirectory.
-   SRC_URI = "file://hello.c"
+```bash
+# meta-myproduct/recipes-hello/hello/hello_1.0.bb
 
-   # This is where the source will be unpacked. 'WORKDIR' is a bitbake variable for the build directory.
-   S = "${WORKDIR}"
+SUMMARY = "A simple Hello World program"
+LICENSE = "GPL-2.0-only"
+LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/GPL-2.0-only;md5=801f80980d171dd6425610833a22dbe6"
 
-   # We override the do_compile task to tell it how to build our simple program.
-   do_compile() {
-       ${CC} ${CFLAGS} ${LDFLAGS} hello.c -o hello
-   }
+# SRC_URI with file:// looks in the 'files' subdirectory relative to this recipe
+SRC_URI = "file://hello.c"
 
-   # We override the do_install task to tell it how to install the binary into the target image.
-   do_install() {
-       # Create the target bin directory (e.g., /usr/bin) inside the image (D is the destination)
-       install -d ${D}${bindir}
-       # Install the binary, setting execute permissions
-       install -m 0755 hello ${D}${bindir}
-   }
-   ```
+# S = WORKDIR because the source is a single file, not an archive
+S = "${WORKDIR}"
 
-4. Build and Test:
+do_compile() {
+    # ${CC} ${CFLAGS} ${LDFLAGS} are provided by the cross-toolchain
+    ${CC} ${CFLAGS} ${LDFLAGS} hello.c -o hello
+}
 
-   ```bash
-   bitbake hello
-   ```
+do_install() {
+    # D  = destination root (becomes the target rootfs)
+    # bindir = /usr/bin (set by bitbake.conf)
+    install -d ${D}${bindir}
+    install -m 0755 hello ${D}${bindir}/hello
+}
+```
 
-   You can test the binary without building a full image:
+### Step 4: Build and Inspect
 
-   ```bash
-   # Find the binary in the temporary build directory
-   find tmp/work/ -name "hello" -type f
-   # Run the binary from the work directory to verify it works
-   ./tmp/work/<arch>/hello/<version>/image/usr/bin/hello
-   # Output: Hello, Yocto World!
-   ```
+```bash
+# Build just this recipe
+bitbake hello
 
-### Key Points: Hello World Recipe
+# Verify the binary in the staging area (before image assembly)
+find tmp/work/ -path "*/hello/1.0-r0/image/usr/bin/hello"
 
-- Recipe filename follows `<packagename>_<version>.bb` format.
-- SRC_URI = "file://..." fetches source from the local files directory.
-- do_compile and do_install are the minimal tasks you often need to override for simple programs.
-- `${D}` is the root of the target filesystem during installation.
-- `${bindir}` automatically expands to the correct binary directory (e.g., /usr/bin).
+# Check it is a cross-compiled ELF (not your host arch)
+file tmp/work/cortexa72-poky-linux/hello/1.0-r0/image/usr/bin/hello
+# Expected: ELF 64-bit LSB executable, ARM aarch64
+
+# Open an interactive build shell for debugging
+bitbake -c devshell hello
+# Inside devshell: ${CC}, ${LD}, ${SYSROOT} are all set; you can run build commands manually
+```
+
+### Step 5: Add to an Image
+
+```bash
+# Option A: Add directly in local.conf (for quick testing)
+IMAGE_INSTALL:append = " hello"
+
+# Option B: Add via a packagegroup (for production)
+# In packagegroup-my-apps.bb:
+RDEPENDS:${PN} = " hello "
+
+# Option C: Add in the image recipe itself
+IMAGE_INSTALL:append = " packagegroup-my-apps"
+```
+
+```bash
+# Build the image with hello included
+bitbake core-image-minimal
+
+# Run in QEMU and test
+runqemu qemuarm64 nographic
+# (on the QEMU target)
+/usr/bin/hello
+# Output: Hello, Yocto World!
+```
+
+## Extending to a CMake Recipe
+
+For a real application using CMake, the recipe becomes simpler by inheriting the `cmake` class:
+
+```bash
+# myapp_2.0.bb
+SUMMARY = "My CMake application"
+LICENSE = "MIT"
+LIC_FILES_CHKSUM = "file://LICENSE;md5=..."
+
+SRC_URI = "git://github.com/myorg/myapp.git;protocol=https;branch=main"
+SRCREV  = "a1b2c3d4e5f6..."    # Always pin to a specific commit
+
+S = "${WORKDIR}/git"
+
+inherit cmake
+
+# cmake class provides do_configure, do_compile, do_install automatically
+# These optionally extend those tasks:
+EXTRA_OECMAKE = "-DENABLE_TESTS=OFF -DBUILD_SHARED_LIBS=ON"
+
+RDEPENDS:${PN} = "libconfig"
+```
+
+## Key Variables Reference
+
+| Variable | Value | Meaning |
+|----------|-------|---------|
+| `${D}` | `${WORKDIR}/image` | Root of the destination filesystem |
+| `${bindir}` | `/usr/bin` | Target binary directory |
+| `${sbindir}` | `/usr/sbin` | Target sbin directory |
+| `${sysconfdir}` | `/etc` | Target config directory |
+| `${libdir}` | `/usr/lib` | Target library directory |
+| `${datadir}` | `/usr/share` | Target data directory |
+| `${CC}` | `aarch64-poky-linux-gcc ...` | Cross-compiler |
+| `${CFLAGS}` | `-march=armv8-a ...` | Target compiler flags |
+| `${LDFLAGS}` | `-Wl,-O1 ...` | Target linker flags |

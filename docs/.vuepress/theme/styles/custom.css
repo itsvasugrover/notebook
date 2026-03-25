@@ -31,6 +31,71 @@
     display: none !important;
 }
 
+.vp-sidebar {
+  width: var(--vp-sidebar-width) !important;
+  padding-left: 32px !important;
+}
+
+.vp-sidebar-control {
+  width: var(--vp-sidebar-width) !important;
+  display: none !important;
+}
+
+@media (min-width: 1440px) {
+  .vp-content {
+    padding-left: var(--vp-sidebar-width) !important;
+    padding-right: 0px !important;
+  }
+
+  .vp-doc-container.has-aside .content-container {
+    max-width: max-content !important;
+  }
+}
+
+/** Full-width navbar: remove max-width cap and all horizontal padding */
+.vp-nav {
+  overflow: visible !important;
+}
+
+.vp-navbar .wrapper {
+  padding: 0 !important;
+  padding-right: 32px !important;
+  padding-left: 32px !important;
+}
+
+.vp-navbar .container {
+  max-width: 100% !important;
+  margin: 0 !important;
+}
+
+@media (min-width: 960px) {
+  .vp-navbar.has-sidebar .content {
+    padding-right: 0 !important;
+  }
+
+  /* Reset divider padding to just sidebar width — no max-width calc needed */
+  .vp-navbar.has-sidebar .divider {
+    padding-left: var(--vp-sidebar-width) !important;
+  }
+}
+
+@media (min-width: 1440px) {
+  .vp-navbar.has-sidebar .content {
+    padding-left: var(--vp-sidebar-width) !important;
+  }
+
+  .vp-navbar.has-sidebar .title {
+    width: var(--vp-sidebar-width) !important;
+    padding-left: 0px !important;
+    justify-content: center !important;
+  }
+
+  /* Override the complex calc() that offsets the divider based on max-width */
+  .vp-navbar.has-sidebar .divider {
+    padding-left: var(--vp-sidebar-width) !important;
+  }
+}
+
 /** Dark mode */
 [data-theme="dark"] {
     /*
